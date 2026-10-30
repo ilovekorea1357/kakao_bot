@@ -15,7 +15,7 @@ async def process_and_reply(callback_token: str, content: str):
     try:
         # Gemini 답변 생성
         response = client.models.generate_content(
-            model="gemini-3.0-flash",
+            model="gemini-3.8-flash",
             contents=f"당신은 AI 에이전트입니다. 간결하게 답변하세요: {content}",
         )
         ai_answer = response.text or "답변을 생성하지 못했습니다."
