@@ -14,7 +14,7 @@ KAKAO_CALLBACK_URL = "https://kapi.kakao.com/v1/bot/callback"
 async def process_and_reply(callback_token: str, content: str):
     # Gemini 답변 생성
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         contents=f"당신은 AI 에이전트입니다. 질문에 간결하고 정확하게 답변하세요.\n\n사용자: {content}",
     )
     ai_answer = response.text
