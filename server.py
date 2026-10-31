@@ -19,7 +19,6 @@ KAKAO_CALLBACK_URL = "https://kapi.kakao.com/v1/bot/callback"
 
 client = genai.Client(api_key=GEMINI_KEY)
 
-# HTTP 연결 풀을 상시 유지하여 네트워크 연결 시간 단축
 http_client = httpx.AsyncClient(
     timeout=10.0,
     limits=httpx.Limits(max_keepalive_connections=20, max_connections=50)
@@ -66,7 +65,6 @@ SYSTEM_PROMPT = """쇼핑몰 상담원입니다. 1~2문장(80자 이내)으로 �
 async def process_and_reply(callback_token: str, user_id: str, content: str):
     start_time = time.time()
     try:
-        # 대화 내역 최근 4개만 유지 (속도 최적화)
         history = chat_sessions.setdefault(user_id, [])
         history.append(f"고객: {content}")
         if len(history) > 4:
@@ -74,9 +72,9 @@ async def process_and_reply(callback_token: str, user_id: str, content: str):
 
         prompt = f"{SYSTEM_PROMPT}\n\n" + "\n".join(history) + "\n상담원:"
 
-        # Gemini 2.5 Flash 비동기 호출 (Thinking 완전 비활성화)
+        # 지원 모델 gemini-3.8-flash 적용
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
@@ -90,7 +88,7 @@ async def process_and_reply(callback_token: str, user_id: str, content: str):
         llm_time = time.time() - start_time
         print(f"[1. Gemini 생성 완료] {llm_time:.2f}초 소요 | 답변: {ai_answer}")
 
-        # 카카오 메시지 콜백 API 즉시 전송
+        # 카카오 메시지 콜백 전송
         body = {
             "skillResponse": {
                 "version": "2.0",
@@ -112,7 +110,7 @@ async def process_and_reply(callback_token: str, user_id: str, content: str):
         print(f"[에러 발생] {e}")
 
 # =========================================================
-# 4. 카카오 웹훅 엔드포인트 (0.01초 내 204 즉시 반환)
+# 4. 카카오 웹훅 엔드포인트
 # =========================================================
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -125,7 +123,6 @@ async def webhook(request: Request):
         user_id = d.get("botUserKey", "user")
 
         if callback_token:
-            # 대기 없이 이벤트 루프에서 즉시 비동기 실행
             asyncio.create_task(process_and_reply(callback_token, user_id, content))
 
     return Response(status_code=204)
