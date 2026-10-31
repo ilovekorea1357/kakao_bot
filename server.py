@@ -1,5 +1,7 @@
+import asyncio
+import time
 import httpx
-from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi import FastAPI, Request, Response
 from google import genai
 from google.genai import types
 
@@ -16,12 +18,17 @@ GEMINI_KEY = "AQ.Ab8RN6LEYTgrZ2GLhK_nBcUVe9WiooJ_MmU1BC0RIJAJ8l14zA"
 KAKAO_CALLBACK_URL = "https://kapi.kakao.com/v1/bot/callback"
 
 client = genai.Client(api_key=GEMINI_KEY)
-http_client = httpx.AsyncClient(timeout=4.0)
+
+# HTTP 연결 풀을 상시 유지하여 네트워크 연결 시간 단축
+http_client = httpx.AsyncClient(
+    timeout=10.0,
+    limits=httpx.Limits(max_keepalive_connections=20, max_connections=50)
+)
 
 chat_sessions = {}
 
 # =========================================================
-# 2. 액션 API 함수 (L-03)
+# 2. 대회 액션 API 호출 함수 (L-03)
 # =========================================================
 async def api_11_check_shipment(order_no: str) -> dict:
     url = f"{ACTION_API_BASE_URL}/api/shipments"
@@ -49,47 +56,46 @@ async def api_24_change_address(order_no: str, new_address: str) -> dict:
         return {"error": str(e)}
 
 # =========================================================
-# 3. 에이전트 지침 (속도 및 분량 최적화)
+# 3. 초경량 프롬프트 및 즉시 응답 처리
 # =========================================================
-SYSTEM_PROMPT = """쇼핑몰 상담 AI입니다. 친절하고 간결하게 1~2문장으로 답하세요.
-[규칙]
-1. 배송지 변경 요청 시 대상 '주문번호'를 먼저 확인하세요.
-2. 주소가 시 단위까지만 제공되면 동·호수 등 상세주소를 요청하세요.
-3. 둘 다 확인되면 변경 접수 완료를 안내하세요.
-4. 말풍선은 100자 이내로 핵심만 전달하세요."""
+SYSTEM_PROMPT = """쇼핑몰 상담원입니다. 1~2문장(80자 이내)으로 핵심만 즉시 답하세요.
+1. 배송지 변경 요청 시 '주문번호'를 먼저 물어보세요.
+2. 주소가 시/구 단위면 동·호수를 포함한 '상세주소'를 물어보세요.
+3. 주문번호와 상세주소가 모두 확인되면 변경 접수가 완료되었다고 안내하세요."""
 
-# =========================================================
-# 4. LLM 처리 및 카카오 콜백 전송
-# =========================================================
 async def process_and_reply(callback_token: str, user_id: str, content: str):
+    start_time = time.time()
     try:
-        if user_id not in chat_sessions:
-            chat_sessions[user_id] = []
-        chat_sessions[user_id].append(f"고객: {content}")
-        history_context = "\n".join(chat_sessions[user_id][-4:])
+        # 대화 내역 최근 4개만 유지 (속도 최적화)
+        history = chat_sessions.setdefault(user_id, [])
+        history.append(f"고객: {content}")
+        if len(history) > 4:
+            history[:] = history[-4:]
 
-        prompt = f"{SYSTEM_PROMPT}\n\n[대화내역]\n{history_context}\n\n상담원:"
+        prompt = f"{SYSTEM_PROMPT}\n\n" + "\n".join(history) + "\n상담원:"
 
-        # 추론 지연 제거(thinking_budget=0) 및 토큰 제한
-        config = types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-            max_output_tokens=100,
-            temperature=0.1
-        )
+        # Gemini 2.5 Flash 비동기 호출 (Thinking 완전 비활성화)
         response = await client.aio.models.generate_content(
-            model="gemini-3.0-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
-            config=config
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                max_output_tokens=100,
+                temperature=0.1,
+            )
         )
-        ai_answer = response.text or "주문번호를 알려주시면 확인해 드리겠습니다."
-        chat_sessions[user_id].append(f"상담원: {ai_answer}")
+        ai_answer = (response.text or "주문번호를 알려주시면 확인해 드리겠습니다.").strip()
+        history.append(f"상담원: {ai_answer}")
 
-        # 카카오 메시지 콜백 규격 전송
+        llm_time = time.time() - start_time
+        print(f"[1. Gemini 생성 완료] {llm_time:.2f}초 소요 | 답변: {ai_answer}")
+
+        # 카카오 메시지 콜백 API 즉시 전송
         body = {
             "skillResponse": {
                 "version": "2.0",
                 "template": {
-                    "outputs": [{"simpleText": {"text": ai_answer.strip()}}]
+                    "outputs": [{"simpleText": {"text": ai_answer}}]
                 }
             }
         }
@@ -98,26 +104,28 @@ async def process_and_reply(callback_token: str, user_id: str, content: str):
             "X-Bot-Callback-Token": callback_token,
             "Content-Type": "application/json"
         }
-        await http_client.post(KAKAO_CALLBACK_URL, json=body, headers=headers)
+        resp = await http_client.post(KAKAO_CALLBACK_URL, json=body, headers=headers)
+        total_time = time.time() - start_time
+        print(f"[2. 카카오 전송 완료] 총 {total_time:.2f}초 | 상태코드: {resp.status_code}")
+
     except Exception as e:
-        print(f"[처리 에러] {e}")
+        print(f"[에러 발생] {e}")
 
 # =========================================================
-# 5. 카카오 웹훅 엔드포인트
+# 4. 카카오 웹훅 엔드포인트 (0.01초 내 204 즉시 반환)
 # =========================================================
 @app.post("/webhook")
-async def webhook(request: Request, background_tasks: BackgroundTasks):
+async def webhook(request: Request):
     payload = await request.json()
-    op = payload.get("op")
-    t = payload.get("t")
-    d = payload.get("d", {})
 
-    # 카카오 웹훅 수신 즉시 백그라운드 태스크 등록 후 204 반환
-    if op == 0 and t == "MESSAGE_CREATE":
-        content = d.get("content", "")
+    if payload.get("op") == 0 and payload.get("t") == "MESSAGE_CREATE":
+        d = payload.get("d", {})
         callback_token = d.get("callbackToken")
-        user_id = d.get("botUserKey", "anonymous")
+        content = d.get("content", "")
+        user_id = d.get("botUserKey", "user")
+
         if callback_token:
-            background_tasks.add_task(process_and_reply, callback_token, user_id, content)
+            # 대기 없이 이벤트 루프에서 즉시 비동기 실행
+            asyncio.create_task(process_and_reply(callback_token, user_id, content))
 
     return Response(status_code=204)
