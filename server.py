@@ -52,7 +52,7 @@ async def process_and_reply(callback_token: str, user_id: str, content: str):
             temperature=0.3
         )
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
             config=config
         )
